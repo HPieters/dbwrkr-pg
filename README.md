@@ -26,5 +26,8 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.0.2
+* Bugfix when connecting without tables caused crash
+
 v0.0.1
 * Initial release
