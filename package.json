@@ -16,7 +16,7 @@
   "author": "Harrie Pieters",
   "license": "MIT",
   "devDependencies": {
-    "dbwrkr": "0.0.6",
+    "dbwrkr": "whyhankee/dbwrkr",
     "eslint": "4.4.1",
     "nodemon": "1.11.0"
   },
