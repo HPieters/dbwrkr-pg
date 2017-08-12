@@ -77,6 +77,7 @@ DbWrkrPostgreSQL.prototype.disconnect = function disconnect (done) {
     this.dbQitems = null;
     this.db.instance.$pool.end();
     this.db = null;
+    return done();
 };
 
 /**
