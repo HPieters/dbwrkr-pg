@@ -1,0 +1,31 @@
+{
+  "name": "dbwrkr-postgresql",
+  "version": "0.0.1",
+  "description": "DBWrkr storage engine for PostgreSQL",
+  "main": "dbwrkr-postgresql.js",
+  "scripts": {
+    "test": "node ./test/dbwrkr-postgresql-tests.js && eslint .",
+    "tdd": "nodemon -w ./ -w ../dbwrkr ./test/dbwrkr-postgresql-tests.js"
+  },
+  "keywords": [
+    "dbwrkr",
+    "wrkr",
+    "postgresql",
+    "pg"
+  ],
+  "author": "Harrie Pieters",
+  "license": "MIT",
+  "devDependencies": {
+    "dbwrkr": "0.0.6",
+    "eslint": "4.4.1",
+    "nodemon": "1.11.0"
+  },
+  "dependencies": {
+    "assert": "1.4.1",
+    "debug": "3.0.0",
+    "flw": "0.0.18",
+    "knex": "0.13.0",
+    "lodash": "4.17.4",
+    "massive": "3.2.0"
+  }
+}
