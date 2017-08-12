@@ -17,9 +17,7 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 - [ ] Check if Database exists, if not create.
 - [ ] Correct implementation of criteria from *find* and *remove*
-- [ ] Use es6 class instead of prototype
-- [ ] Maybe promise based rather than callbacks 
-- [ ] Investigate the posibility of building a generic SQL library for mysql, sqlite, postgresql, etc
+- [ ] Maybe promise based rather than callbacks (dbwrkr)
 - [ ] Performance issues of using an array of strings rather than relational schema
 - [ ] Test Parent feature of an item
 - [ ] Test mapper is just there to pass the test...

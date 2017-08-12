@@ -1,5 +1,5 @@
 /* eslint no-console: 0 */
-const DBWrkrPostgreSQL = require('../dbwrkr-mongodb');
+const DBWrkrPostgreSQL = require('../dbwrkr-postgresql');
 const tests = require('dbwrkr').tests;
 
 tests({
