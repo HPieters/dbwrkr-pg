@@ -47,16 +47,20 @@ DbWrkrPostgreSQL.prototype.connect = function connect (done) {
     massive(this.pgOptions).then(db => {
         debug('connected to PostgreSQL');
         
-        this.db = db;
-        this.dbSubscriptions = this.db.wrkr_subscriptions;
-        this.dbQitems = this.db.wrkr_items;
-
         // Most likely scenario first
         if (db.wrkr_subscriptions && db.wrkr_items) {
+            this.db = db;
+            this.dbSubscriptions = this.db.wrkr_subscriptions;
+            this.dbQitems = this.db.wrkr_items;
             return done(null);
         }
         
-        require('./lib/setup')(this.db, this.pgOptions.database, done);
+        require('./lib/setup')(this.db, this.pgOptions.database, (err, context) => {
+            this.db = context.db;
+            this.dbSubscriptions = this.db.wrkr_subscriptions;
+            this.dbQitems = this.db.wrkr_items;
+            return done(null);
+        });
     }).catch(done);
 };
 
