@@ -26,6 +26,9 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.0.3
+* Bugfix always return string from fieldMapper function for `tid` 
+
 v0.0.2
 * Bugfix when connecting without tables caused crash
 

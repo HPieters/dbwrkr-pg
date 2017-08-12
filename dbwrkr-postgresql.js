@@ -55,7 +55,7 @@ DbWrkrPostgreSQL.prototype.connect = function connect (done) {
             return done(null);
         }
         
-        require('./lib/setup')(this.db, this.pgOptions.database, (err, context) => {
+        require('./lib/setup')(db, this.pgOptions.database, (err, context) => {
             this.db = context.db;
             this.dbSubscriptions = this.db.wrkr_subscriptions;
             this.dbQitems = this.db.wrkr_items;
@@ -236,8 +236,8 @@ function fieldMapper (item) {
     return {
         id: item.id.toString(),
         name: item.name,
-        tid: item.tid,
-        parent: item.parent || undefined,
+        tid: item.tid ? item.tid.toString() : undefined,
+        parent: item.parent,
         payload: item.payload,
         queue: item.queue,
         created: item.created,
