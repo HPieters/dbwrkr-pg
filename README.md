@@ -26,6 +26,9 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.0.4
+* Add pool disconnect to disconnect function 
+
 v0.0.3
 * Bugfix always return string from fieldMapper function for `tid` 
 

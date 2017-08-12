@@ -1,6 +1,6 @@
 {
   "name": "dbwrkr-postgresql",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "DBWrkr storage engine for PostgreSQL",
   "main": "dbwrkr-postgresql.js",
   "scripts": {

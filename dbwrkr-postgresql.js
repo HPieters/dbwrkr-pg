@@ -72,10 +72,11 @@ DbWrkrPostgreSQL.prototype.connect = function connect (done) {
  */
 DbWrkrPostgreSQL.prototype.disconnect = function disconnect (done) {
     if (!this.db) return done();
+
     this.dbSubscriptions = null;
     this.dbQitems = null;
+    this.db.instance.$pool.end();
     this.db = null;
-    return done();
 };
 
 /**
