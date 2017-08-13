@@ -26,6 +26,9 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.0.5
+* Rewrote fetchNext to raw query to get desired functionality 
+
 v0.0.4
 * Add pool disconnect to disconnect function 
 

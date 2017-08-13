@@ -160,24 +160,33 @@ DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
 DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
     debug('fetchNext', queue);
 
-    this.dbQitems.update({
-        'queue': queue,
-        'when <=': new Date()
-    }, {
-        'when': null,
-        'done': new Date()
-    }, {
-        'order': 'created',
-        'single': true
-    }).then(result => {
-        debug('fetchNext result', result);
-        if (!result) return done(null, undefined);
+    const fetchNextQuery = `
+        WITH itemId AS (
+            SELECT id
+            FROM   wrkr_items
+            WHERE  "queue" = $1
+            AND    "when" <= $2
+            ORDER BY created DESC
+            LIMIT  1
+        )
+        UPDATE wrkr_items
+        SET    "when" = NULL, "done" = $2
+        FROM   itemId
+        WHERE  wrkr_items.id = itemId.id
+        RETURNING *;
+    `;
 
-        debug('fetchNext item', result);
-        return done(null, fieldMapper(result));
-    }).catch(err => {
-        return done(err);
-    });
+    this.db.run(fetchNextQuery, [queue, new Date()])
+        .then(result => {
+            debug('fetchNext result', result);
+            if (!result || _.isArray(result) && result.length === 0) return done(null, undefined);
+            result = _.isArray(result) ? _.first(result) : result;
+
+            debug('fetchNext item', result);
+            return done(null, fieldMapper(result));
+        }).catch(err => {
+            return done(err);
+        });
 };
 
 /**
@@ -241,7 +250,7 @@ function fieldMapper(item) {
         id: item.id.toString(),
         name: item.name,
         tid: item.tid ? item.tid.toString() : undefined,
-        parent: item.parent,
+        parent: item.parent ? item.parent : undefined,
         payload: item.payload,
         queue: item.queue,
         created: item.created,
