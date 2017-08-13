@@ -37,7 +37,7 @@ function DbWrkrPostgreSQL(opt) {
 
 /**
  * Connect to database, set internal references and setup tables if they do not exist yet
- * 
+ *
  * @param {function} done Callback option
  */
 DbWrkrPostgreSQL.prototype.connect = function connect(done) {
@@ -68,7 +68,7 @@ DbWrkrPostgreSQL.prototype.connect = function connect(done) {
 /**
  * Disconnect from PostgreSQL
  * @TODO Handle disconnect in massive.js
- * 
+ *
  * @param {function} done Callback option
  */
 DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
@@ -169,21 +169,22 @@ DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
     }, {
         'order': 'created',
         'single': true
-    })
-        .then(result => {
-            if (!result) return done(null, undefined);
+    }).then(result => {
+        debug('fetchNext result', result);
+        if (!result) return done(null, undefined);
 
-            debug('fetchNext item', result);
-            return done(null, fieldMapper(result));
-        })
-        .catch(done);
+        debug('fetchNext item', result);
+        return done(null, fieldMapper(result));
+    }).catch(err => {
+        return done(err);
+    });
 };
 
 /**
  * Find items based on the given criteria
  * @TODO handle multiple id's better.
  * @param {Object} criteria
- * @param {function} done Callback 
+ * @param {function} done Callback
  */
 DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
     debug('Finding ', criteria);
@@ -218,7 +219,7 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
 };
 
 /**
- * Remove items 
+ * Remove items
  * @param {Object} criteria
  * @param {function} done Callback option
  */
