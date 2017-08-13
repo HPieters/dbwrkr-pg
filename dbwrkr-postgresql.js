@@ -4,15 +4,14 @@
 const assert = require('assert');
 const debug = require('debug')('dbwrkr:postgresql');
 const massive = require('massive');
-const flw = require('flw');
 const _ = require('lodash');
 
 /**
  * DbWrkrPostgreSQL Constructor
- * 
+ *
  * @param {Object} opt Options object
  */
-function DbWrkrPostgreSQL (opt) {
+function DbWrkrPostgreSQL(opt) {
     if (!(this instanceof DbWrkrPostgreSQL)) {
         return new DbWrkrPostgreSQL(opt);
     }
@@ -41,12 +40,12 @@ function DbWrkrPostgreSQL (opt) {
  * 
  * @param {function} done Callback option
  */
-DbWrkrPostgreSQL.prototype.connect = function connect (done) {
+DbWrkrPostgreSQL.prototype.connect = function connect(done) {
     debug('Connecting to PostgreSQL', this.pgOptions);
 
     massive(this.pgOptions).then(db => {
         debug('connected to PostgreSQL');
-        
+
         // Most likely scenario first
         if (db.wrkr_subscriptions && db.wrkr_items) {
             this.db = db;
@@ -54,8 +53,10 @@ DbWrkrPostgreSQL.prototype.connect = function connect (done) {
             this.dbQitems = this.db.wrkr_items;
             return done(null);
         }
-        
+
         require('./lib/setup')(db, this.pgOptions.database, (err, context) => {
+            if (err) return done(err);
+
             this.db = context.db;
             this.dbSubscriptions = this.db.wrkr_subscriptions;
             this.dbQitems = this.db.wrkr_items;
@@ -70,7 +71,7 @@ DbWrkrPostgreSQL.prototype.connect = function connect (done) {
  * 
  * @param {function} done Callback option
  */
-DbWrkrPostgreSQL.prototype.disconnect = function disconnect (done) {
+DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
     if (!this.db) return done();
 
     this.dbSubscriptions = null;
@@ -87,10 +88,10 @@ DbWrkrPostgreSQL.prototype.disconnect = function disconnect (done) {
  * @param {String} queueName
  * @param {function} callback Callback option
  */
-DbWrkrPostgreSQL.prototype.subscribe = function subscribe (eventName, queueName, done) {
+DbWrkrPostgreSQL.prototype.subscribe = function subscribe(eventName, queueName, done) {
     debug('Subscribe ', {event: eventName, queue: queueName});
 
-    var subscribeQuery = `INSERT INTO "wrkr_subscriptions" ("eventName", "queues") VALUES ($1, $2) 
+    const subscribeQuery = `INSERT INTO "wrkr_subscriptions" ("eventName", "queues") VALUES ($1, $2)
     ON CONFLICT ("eventName") DO UPDATE SET "queues" = array_append("wrkr_subscriptions"."queues", $3) 
     WHERE "wrkr_subscriptions"."eventName" = $1;`;
 
@@ -106,8 +107,8 @@ DbWrkrPostgreSQL.prototype.subscribe = function subscribe (eventName, queueName,
  */
 DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueName, done) {
     debug('Unsubscribe ', {event: eventName, queue: queueName});
-    
-    var unsubscribeQuery = `UPDATE "wrkr_subscriptions" SET "queues" = array_remove("wrkr_subscriptions"."queues", $1) 
+
+    const unsubscribeQuery = `UPDATE "wrkr_subscriptions" SET "queues" = array_remove("wrkr_subscriptions"."queues", $1) 
     WHERE "wrkr_subscriptions"."eventName" = $2;`;
 
     this.db.run(unsubscribeQuery, [queueName, eventName]).then(_.partial(done, null)).catch(done);
@@ -119,14 +120,14 @@ DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueNa
  * @param {String} eventName
  * @param {function} done Callback option
  */
-DbWrkrPostgreSQL.prototype.subscriptions = function subscriptions (eventName, done) {
+DbWrkrPostgreSQL.prototype.subscriptions = function subscriptions(eventName, done) {
     debug('Subscriptions ', {event: eventName});
 
-    this.dbSubscriptions.findOne({ 'eventName': eventName })
-    .then(event => {
-        return done(null, event ? event.queues : [])
-    })
-    .catch(done);
+    this.dbSubscriptions.findOne({'eventName': eventName})
+        .then(event => {
+            return done(null, event ? event.queues : []);
+        })
+        .catch(done);
 };
 
 /**
@@ -135,7 +136,7 @@ DbWrkrPostgreSQL.prototype.subscriptions = function subscriptions (eventName, do
  * @param {String} eventName
  * @param {function} done Callback option
  */
-DbWrkrPostgreSQL.prototype.publish = function publish (events, done) {
+DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
     const publishEvents = Array.isArray(events) ? events : [events];
     debug('Publish ', publishEvents);
 
@@ -143,7 +144,7 @@ DbWrkrPostgreSQL.prototype.publish = function publish (events, done) {
         if (publishEvents.length !== results.length) {
             return done(new Error('insertErrorNotEnoughEvents'));
         }
-       
+
         const createdIds = results.map(o => { return o.id.toString(); });
         debug('Published ', publishEvents.length, createdIds);
         return done(null, createdIds);
@@ -156,8 +157,8 @@ DbWrkrPostgreSQL.prototype.publish = function publish (events, done) {
  * @param {String} queue
  * @param {function} done Callback 
  */
-DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext (queue, done) {
-    debug('FetchNext', queue);
+DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
+    debug('fetchNext', queue);
 
     this.dbQitems.update({
         'queue': queue,
@@ -169,13 +170,13 @@ DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext (queue, done) {
         'order': 'created',
         'single': true
     })
-    .then(result => {
-        if (!result) return done(null, undefined);
+        .then(result => {
+            if (!result) return done(null, undefined);
 
-        debug('fetchNext', result);
-        return done(null, fieldMapper(result));
-    })
-    .catch(done);
+            debug('fetchNext item', result);
+            return done(null, fieldMapper(result));
+        })
+        .catch(done);
 };
 
 /**
@@ -184,19 +185,19 @@ DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext (queue, done) {
  * @param {Object} criteria
  * @param {function} done Callback 
  */
-DbWrkrPostgreSQL.prototype.find = function find (criteria, done) {
+DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
     debug('Finding ', criteria);
 
     // Handle multiple id's
     if (criteria.id && Array.isArray(criteria.id) && criteria.id.length > 1) {
-        let ids = criteria.id.join(',');
-        
+        const ids = criteria.id.join(',');
+
         return this.dbQitems.where(`id in (${ids})`).then(result => {
             debug('Found ', result);
-            var records = result.map(fieldMapper);
+            const records = result.map(fieldMapper);
             return done(null, records);
         })
-        .catch(done);
+            .catch(done);
     }
 
     if (criteria.id && Array.isArray(criteria.id)) {
@@ -208,12 +209,12 @@ DbWrkrPostgreSQL.prototype.find = function find (criteria, done) {
     }
 
     this.dbQitems.find(criteria)
-    .then(result => {
-        debug('Found ', result);
-        var records = result.map(fieldMapper);
-        return done(null, records);
-    })
-    .catch(done);
+        .then(result => {
+            debug('Found ', result);
+            const records = result.map(fieldMapper);
+            return done(null, records);
+        })
+        .catch(done);
 };
 
 /**
@@ -221,12 +222,12 @@ DbWrkrPostgreSQL.prototype.find = function find (criteria, done) {
  * @param {Object} criteria
  * @param {function} done Callback option
  */
-DbWrkrPostgreSQL.prototype.remove = function remove (criteria, done) {
+DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
     debug('Removing', criteria);
 
     return this.dbQitems.destroy(criteria)
-    .then(_.partial(done, null))
-    .catch(done);
+        .then(_.partial(done, null))
+        .catch(done);
 };
 
 /**
@@ -234,7 +235,7 @@ DbWrkrPostgreSQL.prototype.remove = function remove (criteria, done) {
  * @TODO only needed to convert null to undefined
  * @param {qitem} item the record to fieldmap
  */
-function fieldMapper (item) {
+function fieldMapper(item) {
     return {
         id: item.id.toString(),
         name: item.name,
@@ -248,5 +249,5 @@ function fieldMapper (item) {
         retryCount: item.retryCount || 0,
     };
 }
-  
+
 module.exports = DbWrkrPostgreSQL;

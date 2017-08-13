@@ -3,7 +3,7 @@ const DBWrkrPostgreSQL = require('../dbwrkr-postgresql');
 const tests = require('dbwrkr').tests;
 
 tests({
-  storage: new DBWrkrPostgreSQL({
-    dbName: 'dbwrkr'
-  })
+    storage: new DBWrkrPostgreSQL({
+        dbName: 'dbwrkr'
+    })
 });
