@@ -168,7 +168,7 @@ DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
         'done': new Date()
     }, {
         'order': 'created',
-        'single': true
+        limit: 1,
     }).then(result => {
         debug('fetchNext result', result);
         if (!result) return done(null, undefined);
