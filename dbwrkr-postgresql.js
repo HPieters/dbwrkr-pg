@@ -15,6 +15,7 @@ function DbWrkrPostgreSQL(opt) {
     if (!(this instanceof DbWrkrPostgreSQL)) {
         return new DbWrkrPostgreSQL(opt);
     }
+
     debug('DbWrkrPostgreSQL - opt', opt);
 
     this.pgOptions = {
