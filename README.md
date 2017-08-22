@@ -14,6 +14,9 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.1.2
+* Rewrote to support Node.js v4.*
+
 v0.1.1
 * Rewrote queries to use placeholders for sanitization 
 

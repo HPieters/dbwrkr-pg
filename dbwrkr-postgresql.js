@@ -3,7 +3,7 @@
 // Modules
 const assert = require('assert');
 const debug = require('debug')('dbwrkr:postgresql');
-const {Pool} = require('pg');
+const Pool = require('pg').Pool;
 const _ = require('lodash');
 const flw = require('flw');
 
@@ -227,7 +227,7 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
         criteria.id = _.first(criteria.id);
     }
 
-    const whereSQL = utils.createWhereSQL(criteria);
+    const whereSQL = utils.createWhereSQL(criteria, 1);
 
     if (!criteria.id && !criteria.when) {
         const newDate = new Date(0, 0, 0);
@@ -264,7 +264,7 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
 DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
     debug('Removing', criteria);
 
-    const whereSQL = utils.createWhereSQL(criteria);
+    const whereSQL = utils.createWhereSQL(criteria, 1);
     const removeQuery = `
         DELETE FROM "wrkr_items"
         ${whereSQL.text}
