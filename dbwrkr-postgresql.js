@@ -7,8 +7,9 @@ const {Pool} = require('pg');
 const _ = require('lodash');
 const flw = require('flw');
 
-
+// Libraries
 const check = require('./lib/check');
+const utils = require('./lib/utils');
 
 /**
  * DbWrkrPostgreSQL Constructor
@@ -137,13 +138,12 @@ DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
     const publishEvents = Array.isArray(events) ? events : [events];
 
     debug('Publish ', publishEvents);
-
-    const values = _.map(events, convertEventToQuery).join(',');
+    const queryData = utils.convertEventsToQuery(events);
     const publishQuery = `
         INSERT INTO wrkr_items ("name", "queue", "tid", "payload", "parent", "created", "when", "retryCount") 
-        VALUES ${values} RETURNING *`;
+        VALUES ${queryData.text} RETURNING *`;
 
-    this.pool.query(publishQuery, (err, result) => {
+    this.pool.query(publishQuery, queryData.values, (err, result) => {
         if (err) return done(err);
 
         if (publishEvents.length !== result.rowCount) {
@@ -158,7 +158,8 @@ DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
 
 /**
  * Fetch the next item
- * @TODO use between function (see rethinkDB)
+ * 
+ * @TODO Investigate if we should use between function (see rethinkDB implementation)
  * @param {String} queue
  * @param {function} done Callback 
  */
@@ -191,13 +192,14 @@ DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
         result = _.isArray(result) ? _.first(result) : result;
 
         debug('fetchNext item', result);
-        return done(null, fieldMapper(result));
+        return done(null, utils.fieldMapper(result));
     });
 };
 
 /**
  * Find items based on the given criteria
- * @TODO handle multiple id's better.
+ * 
+ * @TODO Check if we can handle multiple id's better.
  * @param {Object} criteria
  * @param {function} done Callback
  */
@@ -210,13 +212,13 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
         const findIdQuery = `
             SELECT *
             FROM   "wrkr_items"
-            WHERE  id in (${ids})`;
+            WHERE  id in ($1)`;
 
-        return this.pool.query(findIdQuery, (err, result) => {
+        return this.pool.query(findIdQuery, [`'${ids}'`], (err, result) => {
             if (err) return done(err);
             debug('Found ', result.rows);
 
-            const records = result.rows.map(fieldMapper);
+            const records = result.rows.map(utils.fieldMapper);
             return done(null, records);
         });
     }
@@ -225,118 +227,55 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
         criteria.id = _.first(criteria.id);
     }
 
-    let whereSQL = createWhereSQL(criteria);
+    const whereSQL = utils.createWhereSQL(criteria);
 
     if (!criteria.id && !criteria.when) {
         const newDate = new Date(0, 0, 0);
         if (Object.keys(criteria).length === 0) {
-            whereSQL += ' WHERE ';
+            whereSQL.text += ' WHERE ';
         } else {
-            whereSQL += ' AND ';
+            whereSQL.text += ' AND ';
         }
 
-        whereSQL += `"when" > '${newDate.toISOString()}' `;
+        whereSQL.text += `"when" > $${whereSQL.counter} `;
+        whereSQL.values = whereSQL.values.concat([`'${newDate.toISOString()}'`]);
     }
 
     const findQuery = `
         SELECT *
         FROM   "wrkr_items" 
-        ${whereSQL}`;
+        ${whereSQL.text}`;
 
-    this.pool.query(findQuery, (err, result) => {
+    this.pool.query(findQuery, whereSQL.values, (err, result) => {
         if (err) return done(err);
 
         debug('Found ', result.rows);
-        const records = result.rows.map(fieldMapper);
+        const records = result.rows.map(utils.fieldMapper);
         return done(null, records);
     });
 };
 
 /**
- * Remove items
+ * Remove items based on criteria
+ * 
  * @param {Object} criteria
  * @param {function} done Callback option
  */
 DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
     debug('Removing', criteria);
 
-    const whereSQL = createWhereSQL(criteria);
+    const whereSQL = utils.createWhereSQL(criteria);
     const removeQuery = `
         DELETE FROM "wrkr_items"
-        ${whereSQL}
+        ${whereSQL.text}
     `;
 
-    this.pool.query(removeQuery, err => {
+    this.pool.query(removeQuery, whereSQL.values, err => {
         if (err) return done(err);
 
         debug('Removed', criteria);
         done(null);
     });
 };
-
-/**
- * Map (all) fields to the correct values
- * @TODO only needed to convert null to undefined
- * @param {qitem} item the record to fieldmap
- */
-function fieldMapper(item) {
-    return {
-        id: item.id,
-        name: item.name,
-        tid: item.tid ? item.tid : undefined,
-        parent: item.parent ? item.parent : undefined,
-        payload: item.payload,
-        queue: item.queue,
-        created: item.created,
-        when: item.when || undefined,
-        done: item.done || undefined,
-        retryCount: item.retryCount || 0,
-    };
-}
-
-/**
- * 
- * @param {*} event 
- */
-function convertEventToQuery(event) {
-    const payload = event.payload ? JSON.stringify(event.payload) : null;
-    const created = event.created ? event.created.toISOString() : null;
-    const when = event.when ? event.when.toISOString() : null;
-    const parent = event.parent ? event.parent.toString() : null;
-
-    return `(
-        '${event.name}',
-        '${event.queue}',
-        '${event.tid}',
-        '${payload}',
-        ${parent},
-        '${created}',
-        '${when}',
-        ${event.retryCount}
-    )`;
-}
-
-/**
- * 
- * @param {*} criteria 
- */
-function createWhereSQL(criteria) {
-    if (Object.keys(criteria).length === 0) {
-        return '';
-    }
-
-    let first = true;
-
-    return _.reduce(criteria, (accumulator, value, key) => {
-        let sql = accumulator;
-        if (!first) {
-            sql += ' AND ';
-        } else {
-            first = false;
-        }
-        sql += `"${key}" = '${value}'`;
-        return sql;
-    }, 'WHERE ');
-}
 
 module.exports = DbWrkrPostgreSQL;

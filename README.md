@@ -14,6 +14,9 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.1.1
+* Rewrote queries to use placeholders for sanitization 
+
 v0.1.0
 * Rewrote from Massive to pg module, 
 * Create database if does nog exist
