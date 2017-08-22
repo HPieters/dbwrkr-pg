@@ -3,8 +3,12 @@
 // Modules
 const assert = require('assert');
 const debug = require('debug')('dbwrkr:postgresql');
-const massive = require('massive');
+const {Pool} = require('pg');
 const _ = require('lodash');
+const flw = require('flw');
+
+
+const check = require('./lib/check');
 
 /**
  * DbWrkrPostgreSQL Constructor
@@ -31,9 +35,7 @@ function DbWrkrPostgreSQL(opt) {
     assert(this.pgOptions.database, 'has database name');
     assert(this.pgOptions.port, 'has database port');
 
-    this.db = null;
-    this.tSubscriptions = null;
-    this.tQitems = null;
+    this.pool = null;
 }
 
 /**
@@ -44,26 +46,13 @@ function DbWrkrPostgreSQL(opt) {
 DbWrkrPostgreSQL.prototype.connect = function connect(done) {
     debug('Connecting to PostgreSQL', this.pgOptions);
 
-    massive(this.pgOptions).then(db => {
-        debug('connected to PostgreSQL');
+    this.pool = new Pool(this.pgOptions);
 
-        // Most likely scenario first
-        if (db.wrkr_subscriptions && db.wrkr_items) {
-            this.db = db;
-            this.dbSubscriptions = this.db.wrkr_subscriptions;
-            this.dbQitems = this.db.wrkr_items;
-            return done(null);
-        }
-
-        require('./lib/setup')(db, this.pgOptions.database, (err, context) => {
-            if (err) return done(err);
-
-            this.db = context.db;
-            this.dbSubscriptions = this.db.wrkr_subscriptions;
-            this.dbQitems = this.db.wrkr_items;
-            return done(null);
-        });
-    }).catch(done);
+    flw.series([
+        _.partial(check.database, this.pool, this.pgOptions),
+        _.partial(check.subscriptions, this.pool, this.pgOptions),
+        _.partial(check.items, this.pool, this.pgOptions)
+    ], done);
 };
 
 /**
@@ -73,13 +62,8 @@ DbWrkrPostgreSQL.prototype.connect = function connect(done) {
  * @param {function} done Callback option
  */
 DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
-    if (!this.db) return done();
-
-    this.dbSubscriptions = null;
-    this.dbQitems = null;
-    this.db.instance.$pool.end();
-    this.db = null;
-    return done();
+    if (!this.pool) return done();
+    this.pool.end(done);
 };
 
 /**
@@ -92,11 +76,14 @@ DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
 DbWrkrPostgreSQL.prototype.subscribe = function subscribe(eventName, queueName, done) {
     debug('Subscribe ', {event: eventName, queue: queueName});
 
-    const subscribeQuery = `INSERT INTO "wrkr_subscriptions" ("eventName", "queues") VALUES ($1, $2)
-    ON CONFLICT ("eventName") DO UPDATE SET "queues" = array_append("wrkr_subscriptions"."queues", $3) 
-    WHERE "wrkr_subscriptions"."eventName" = $1;`;
+    const subscribeQuery = `
+        INSERT INTO  "wrkr_subscriptions" ("eventName", "queues") 
+        VALUES       ($1, $2)
+        ON CONFLICT  ("eventName") DO UPDATE 
+        SET          "queues" = array_append("wrkr_subscriptions"."queues", $3) 
+        WHERE        "wrkr_subscriptions"."eventName" = $1;`;
 
-    this.db.run(subscribeQuery, [eventName, `{${queueName}}`, queueName]).then(_.partial(done, null)).catch(done);
+    this.pool.query(subscribeQuery, [eventName, `{${queueName}}`, queueName], done);
 };
 
 /**
@@ -109,10 +96,12 @@ DbWrkrPostgreSQL.prototype.subscribe = function subscribe(eventName, queueName, 
 DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueName, done) {
     debug('Unsubscribe ', {event: eventName, queue: queueName});
 
-    const unsubscribeQuery = `UPDATE "wrkr_subscriptions" SET "queues" = array_remove("wrkr_subscriptions"."queues", $1) 
-    WHERE "wrkr_subscriptions"."eventName" = $2;`;
+    const unsubscribeQuery = `
+        UPDATE  "wrkr_subscriptions"
+        SET     "queues" = array_remove("wrkr_subscriptions"."queues", $1) 
+        WHERE   "wrkr_subscriptions"."eventName" = $2;`;
 
-    this.db.run(unsubscribeQuery, [queueName, eventName]).then(_.partial(done, null)).catch(done);
+    this.pool.query(unsubscribeQuery, [queueName, eventName], done);
 };
 
 /**
@@ -124,32 +113,47 @@ DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueNa
 DbWrkrPostgreSQL.prototype.subscriptions = function subscriptions(eventName, done) {
     debug('Subscriptions ', {event: eventName});
 
-    this.dbSubscriptions.findOne({'eventName': eventName})
-        .then(event => {
-            return done(null, event ? event.queues : []);
-        })
-        .catch(done);
+    const subscriptionsQuery = `
+        SELECT  * 
+        FROM    wrkr_subscriptions 
+        WHERE   "eventName" = $1 
+        LIMIT   1`;
+
+    this.pool.query(subscriptionsQuery, [eventName], (err, res) => {
+        if (err) return done(err);
+
+        const result = res.rows[0];
+        done(null, result ? result.queues : []);
+    });
 };
 
 /**
  * Publish events
- * @TODO why are id's strings?
+ *
  * @param {String} eventName
  * @param {function} done Callback option
  */
 DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
     const publishEvents = Array.isArray(events) ? events : [events];
+
     debug('Publish ', publishEvents);
 
-    this.dbQitems.insert(publishEvents).then(results => {
-        if (publishEvents.length !== results.length) {
+    const values = _.map(events, convertEventToQuery).join(',');
+    const publishQuery = `
+        INSERT INTO wrkr_items ("name", "queue", "tid", "payload", "parent", "created", "when", "retryCount") 
+        VALUES ${values} RETURNING *`;
+
+    this.pool.query(publishQuery, (err, result) => {
+        if (err) return done(err);
+
+        if (publishEvents.length !== result.rowCount) {
             return done(new Error('insertErrorNotEnoughEvents'));
         }
 
-        const createdIds = results.map(o => { return o.id.toString(); });
+        const createdIds = result.rows.map(o => { return o.id.toString(); });
         debug('Published ', publishEvents.length, createdIds);
         return done(null, createdIds);
-    }).catch(done);
+    });
 };
 
 /**
@@ -177,17 +181,18 @@ DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
         RETURNING *;
     `;
 
-    this.db.run(fetchNextQuery, [queue, new Date()])
-        .then(result => {
-            debug('fetchNext result', result);
-            if (!result || _.isArray(result) && result.length === 0) return done(null, undefined);
-            result = _.isArray(result) ? _.first(result) : result;
+    this.pool.query(fetchNextQuery, [queue, new Date()], (err, res) => {
+        if (err) return done(err);
 
-            debug('fetchNext item', result);
-            return done(null, fieldMapper(result));
-        }).catch(err => {
-            return done(err);
-        });
+        let result = res && res.rows ? res.rows[0] : false;
+
+        debug('fetchNext result', result);
+        if (!result || _.isArray(result) && result.length === 0) return done(null, undefined);
+        result = _.isArray(result) ? _.first(result) : result;
+
+        debug('fetchNext item', result);
+        return done(null, fieldMapper(result));
+    });
 };
 
 /**
@@ -202,30 +207,49 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
     // Handle multiple id's
     if (criteria.id && Array.isArray(criteria.id) && criteria.id.length > 1) {
         const ids = criteria.id.join(',');
+        const findIdQuery = `
+            SELECT *
+            FROM   "wrkr_items"
+            WHERE  id in (${ids})`;
 
-        return this.dbQitems.where(`id in (${ids})`).then(result => {
-            debug('Found ', result);
-            const records = result.map(fieldMapper);
+        return this.pool.query(findIdQuery, (err, result) => {
+            if (err) return done(err);
+            debug('Found ', result.rows);
+
+            const records = result.rows.map(fieldMapper);
             return done(null, records);
-        })
-            .catch(done);
+        });
     }
 
     if (criteria.id && Array.isArray(criteria.id)) {
         criteria.id = _.first(criteria.id);
     }
 
+    let whereSQL = createWhereSQL(criteria);
+
     if (!criteria.id && !criteria.when) {
-        criteria['when >'] = new Date(0, 0, 0);
+        const newDate = new Date(0, 0, 0);
+        if (Object.keys(criteria).length === 0) {
+            whereSQL += ' WHERE ';
+        } else {
+            whereSQL += ' AND ';
+        }
+
+        whereSQL += `"when" > '${newDate.toISOString()}' `;
     }
 
-    this.dbQitems.find(criteria)
-        .then(result => {
-            debug('Found ', result);
-            const records = result.map(fieldMapper);
-            return done(null, records);
-        })
-        .catch(done);
+    const findQuery = `
+        SELECT *
+        FROM   "wrkr_items" 
+        ${whereSQL}`;
+
+    this.pool.query(findQuery, (err, result) => {
+        if (err) return done(err);
+
+        debug('Found ', result.rows);
+        const records = result.rows.map(fieldMapper);
+        return done(null, records);
+    });
 };
 
 /**
@@ -236,9 +260,18 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
 DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
     debug('Removing', criteria);
 
-    return this.dbQitems.destroy(criteria)
-        .then(_.partial(done, null))
-        .catch(done);
+    const whereSQL = createWhereSQL(criteria);
+    const removeQuery = `
+        DELETE FROM "wrkr_items"
+        ${whereSQL}
+    `;
+
+    this.pool.query(removeQuery, err => {
+        if (err) return done(err);
+
+        debug('Removed', criteria);
+        done(null);
+    });
 };
 
 /**
@@ -248,9 +281,9 @@ DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
  */
 function fieldMapper(item) {
     return {
-        id: item.id.toString(),
+        id: item.id,
         name: item.name,
-        tid: item.tid ? item.tid.toString() : undefined,
+        tid: item.tid ? item.tid : undefined,
         parent: item.parent ? item.parent : undefined,
         payload: item.payload,
         queue: item.queue,
@@ -259,6 +292,53 @@ function fieldMapper(item) {
         done: item.done || undefined,
         retryCount: item.retryCount || 0,
     };
+}
+
+/**
+ * 
+ * @param {*} event 
+ */
+function convertEventToQuery(event) {
+    const payload = event.payload ? JSON.stringify(event.payload) : null;
+    const created = event.created ? event.created.toISOString() : null;
+    const when = event.when ? event.when.toISOString() : null;
+    const parent = event.parent ? event.parent.toString() : null;
+
+    return `(
+        '${event.name}',
+        '${event.queue}',
+        '${event.tid}',
+        '${payload}',
+        ${parent},
+        '${created}',
+        '${when}',
+        ${event.retryCount}
+    )`;
+}
+
+/**
+ * 
+ * @param {*} criteria 
+ */
+function createWhereSQL(criteria) {
+    if (Object.keys(criteria).length === 0) {
+        return '';
+    }
+
+    let whereSQL = 'WHERE ';
+    let first = true;
+    whereSQL += _.reduce(criteria, (accumulator, value, key) => {
+        let sql = accumulator;
+        if (!first) {
+            sql += ' AND ';
+        } else {
+            first = false;
+        }
+        sql += `"${key}" = '${value}'`;
+        return sql;
+    }, '');
+
+    return whereSQL;
 }
 
 module.exports = DbWrkrPostgreSQL;
