@@ -1,6 +1,6 @@
 ## DBWrkr PostgreSQL storage engine
 
-**Warning**, work in progres not yet thoroughly tested to be published.
+[![Build Status](https://travis-ci.org/HPieters/dbwrkr-postgresql.svg?branch=master)](https://travis-ci.org/HPieters/dbwrkr-postgresql.svg?branch=master)
 
 PostgreSQL storage engine for [DBWrkr](https://github.com/whyhankee/dbwrkr). 
 
