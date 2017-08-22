@@ -325,9 +325,9 @@ function createWhereSQL(criteria) {
         return '';
     }
 
-    let whereSQL = 'WHERE ';
     let first = true;
-    whereSQL += _.reduce(criteria, (accumulator, value, key) => {
+
+    return _.reduce(criteria, (accumulator, value, key) => {
         let sql = accumulator;
         if (!first) {
             sql += ' AND ';
@@ -336,9 +336,7 @@ function createWhereSQL(criteria) {
         }
         sql += `"${key}" = '${value}'`;
         return sql;
-    }, '');
-
-    return whereSQL;
+    }, 'WHERE ');
 }
 
 module.exports = DbWrkrPostgreSQL;
