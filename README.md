@@ -10,7 +10,7 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Requirements
 
-- Requires PostgreSQL 9.3+ (Support for Upsert)
+- Requires PostgreSQL 9.4+ (Support for Upsert and jsonb)
 
 ## Changelog
 
