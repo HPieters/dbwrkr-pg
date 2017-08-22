@@ -14,6 +14,11 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.1.0
+* Rewrote from Massive to pg module, 
+* Create database if does nog exist
+* Pass 100% of tests 
+
 v0.0.5
 * Rewrote fetchNext to raw query to get desired functionality 
 
