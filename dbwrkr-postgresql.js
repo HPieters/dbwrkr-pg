@@ -6,9 +6,10 @@ const debug = require('debug')('dbwrkr:postgresql');
 const Pool = require('pg').Pool;
 const _ = require('lodash');
 const flw = require('flw');
+const async = require('async');
 
 // Libraries
-const check = require('./lib/check');
+const checkDatabaseAndTables = require('./lib/check');
 const utils = require('./lib/utils');
 
 /**
@@ -37,6 +38,10 @@ function DbWrkrPostgreSQL(opt) {
     assert(this.pgOptions.port, 'has database port');
 
     this.pool = null;
+    this.memorizedEventIds = {};
+    this.memorizedQueueIds = {};
+    this.memorizedEventNames = {};
+    this.memorizedQueueNames = {};
 }
 
 /**
@@ -48,12 +53,7 @@ DbWrkrPostgreSQL.prototype.connect = function connect(done) {
     debug('Connecting to PostgreSQL', this.pgOptions);
 
     this.pool = new Pool(this.pgOptions);
-
-    flw.series([
-        _.partial(check.database, this.pool, this.pgOptions),
-        _.partial(check.subscriptions, this.pool, this.pgOptions),
-        _.partial(check.items, this.pool, this.pgOptions)
-    ], done);
+    checkDatabaseAndTables(this.pool, this.pgOptions, done);
 };
 
 /**
@@ -64,6 +64,8 @@ DbWrkrPostgreSQL.prototype.connect = function connect(done) {
  */
 DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
     if (!this.pool) return done();
+    this.memorizedEvents = null;
+    this.memorizedQueues = null;
     this.pool.end(done);
 };
 
@@ -77,14 +79,18 @@ DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
 DbWrkrPostgreSQL.prototype.subscribe = function subscribe(eventName, queueName, done) {
     debug('Subscribe ', {event: eventName, queue: queueName});
 
-    const subscribeQuery = `
-        INSERT INTO  "wrkr_subscriptions" ("eventName", "queues") 
-        VALUES       ($1, $2)
-        ON CONFLICT  ("eventName") DO UPDATE 
-        SET          "queues" = array_append("wrkr_subscriptions"."queues", $3) 
-        WHERE        "wrkr_subscriptions"."eventName" = $1;`;
-
-    this.pool.query(subscribeQuery, [eventName, `{${queueName}}`, queueName], done);
+    flw.series([
+        (c, cb) => {
+            this.getId('event', eventName, c._store('eventId', cb));
+        },
+        (c, cb) => {
+            this.getId('queue', queueName , c._store('queueId', cb));
+        },
+        (c, cb) => {
+            const subscribeQuery = 'INSERT INTO "wrkr_subscriptions" ("event_id", "queue_id") VALUES ($1, $2);';
+            this.pool.query(subscribeQuery, [c.eventId, c.queueId], cb);
+        }
+    ], done);
 };
 
 /**
@@ -97,12 +103,18 @@ DbWrkrPostgreSQL.prototype.subscribe = function subscribe(eventName, queueName, 
 DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueName, done) {
     debug('Unsubscribe ', {event: eventName, queue: queueName});
 
-    const unsubscribeQuery = `
-        UPDATE  "wrkr_subscriptions"
-        SET     "queues" = array_remove("wrkr_subscriptions"."queues", $1) 
-        WHERE   "wrkr_subscriptions"."eventName" = $2;`;
-
-    this.pool.query(unsubscribeQuery, [queueName, eventName], done);
+    flw.series([
+        (c, cb) => {
+            this.getId('event', eventName, c._store('eventId', cb));
+        },
+        (c, cb) => {
+            this.getId('queue', queueName, c._store('queueId', cb));
+        },
+        (c, cb) => {
+            const unsubscribeQuery = 'DELETE FROM "wrkr_subscriptions" WHERE "event_id" = $1 AND "queue_id" = $2';
+            this.pool.query(unsubscribeQuery, [c.eventId, c.queueId], cb);
+        }
+    ], done);
 };
 
 /**
@@ -114,18 +126,35 @@ DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueNa
 DbWrkrPostgreSQL.prototype.subscriptions = function subscriptions(eventName, done) {
     debug('Subscriptions ', {event: eventName});
 
-    const subscriptionsQuery = `
-        SELECT  * 
-        FROM    wrkr_subscriptions 
-        WHERE   "eventName" = $1 
-        LIMIT   1`;
+    async.waterfall([
+        (cb) => {
+            this.getId('event', eventName, cb);
+        },
+        (eventId, cb) => {
+            const subscriptionsQuery = `
+                SELECT      su.event_id, qu.name
+                FROM        wrkr_subscriptions AS su
+                LEFT JOIN   wrkr_queues AS qu ON su.queue_id=qu.id
+                WHERE       event_id = $1`;
 
-    this.pool.query(subscriptionsQuery, [eventName], (err, res) => {
-        if (err) return done(err);
+            this.pool.query(subscriptionsQuery, [eventId], (err, res) => {
+                if (err) return cb(err);
+                cb(null, res.rows);
+            });
+        },
+        (subscriptions, cb) => {
+            if (subscriptions.length === 0) {
+                return cb(null, []);
+            }
 
-        const result = res.rows[0];
-        done(null, result ? result.queues : []);
-    });
+            const queueNames = _.reduce(subscriptions, (subscriptionQueues, subscription) => {
+                subscriptionQueues.push(subscription.name);
+                return subscriptionQueues;
+            }, []);
+
+            return cb(null, queueNames);
+        }
+    ], done);
 };
 
 /**
@@ -140,8 +169,18 @@ DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
     debug('Publish ', publishEvents);
     const queryData = utils.convertEventsToQuery(events);
     const publishQuery = `
-        INSERT INTO wrkr_items ("name", "queue", "tid", "payload", "parent", "created", "when", "retryCount") 
-        VALUES ${queryData.text} RETURNING *`;
+        INSERT INTO wrkr_items (
+            "event_id", 
+            "queue_id", 
+            "tid", 
+            "payload", 
+            "parent", 
+            "created", 
+            "when", 
+            "retryCount") 
+        VALUES 
+            ${queryData.text} 
+        RETURNING *`;
 
     this.pool.query(publishQuery, queryData.values, (err, result) => {
         if (err) return done(err);
@@ -166,33 +205,42 @@ DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
 DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
     debug('fetchNext', queue);
 
-    const fetchNextQuery = `
-        WITH itemId AS (
-            SELECT id
-            FROM   wrkr_items
-            WHERE  "queue" = $1
-            AND    "when" <= $2
-            ORDER BY created DESC
-            LIMIT  1
-        )
-        UPDATE wrkr_items
-        SET    "when" = NULL, "done" = $2
-        FROM   itemId
-        WHERE  wrkr_items.id = itemId.id
-        RETURNING *;
-    `;
 
-    this.pool.query(fetchNextQuery, [queue, new Date()], (err, res) => {
+    async.waterfall([
+        cb => {
+            this.getId('queue', queue, cb);
+        }
+    ], (err, queueId) => {
         if (err) return done(err);
 
-        let result = res && res.rows ? res.rows[0] : false;
+        const fetchNextQuery = `
+            WITH itemId AS (
+                SELECT      id
+                FROM        wrkr_items
+                WHERE       "queue_id" = $1
+                AND         "when" <= $2
+                ORDER BY    created DESC
+                LIMIT  1
+            )
+            UPDATE wrkr_items
+            SET    "when" = NULL, "done" = $2
+            FROM   itemId
+            WHERE  wrkr_items.id = itemId.id
+            RETURNING *;
+        `;
 
-        debug('fetchNext result', result);
-        if (!result || _.isArray(result) && result.length === 0) return done(null, undefined);
-        result = _.isArray(result) ? _.first(result) : result;
+        this.pool.query(fetchNextQuery, [queueId, new Date()], (err, res) => {
+            if (err) return done(err);
 
-        debug('fetchNext item', result);
-        return done(null, utils.fieldMapper(result));
+            let result = res && res.rows ? res.rows[0] : false;
+
+            debug('fetchNext result', result);
+            if (!result || _.isArray(result) && result.length === 0) return done(null, undefined);
+            result = _.isArray(result) ? _.first(result) : result;
+
+            debug('fetchNext item', result);
+            fieldMapper(this, result, done);
+        });
     });
 };
 
@@ -218,8 +266,9 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
             if (err) return done(err);
             debug('Found ', result.rows);
 
-            const records = result.rows.map(utils.fieldMapper);
-            return done(null, records);
+            async.map(result.rows, (row, next) => {
+                fieldMapper(this, row, next);
+            }, done);
         });
     }
 
@@ -227,31 +276,63 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
         criteria.id = _.first(criteria.id);
     }
 
-    const whereSQL = utils.createWhereSQL(criteria, 1);
 
-    if (!criteria.id && !criteria.when) {
-        const newDate = new Date(0, 0, 0);
-        if (Object.keys(criteria).length === 0) {
-            whereSQL.text += ' WHERE ';
-        } else {
-            whereSQL.text += ' AND ';
+    async.waterfall([
+        (cb) => {
+            if (!criteria.name) {
+                return cb();
+            }
+
+            this.getId('event', criteria.name, (err, eventId) => {
+                if (err) return cb(err);
+                criteria.event_id = eventId;
+                delete criteria.name;
+                cb();
+            });
+        },
+        (cb) => {
+            if (!criteria.queue) {
+                return cb();
+            }
+
+            this.getId('queue', criteria.queue, (err, queueId) => {
+                if (err) return cb(err);
+
+                criteria.queue_id = queueId;
+                delete criteria.queue;
+                cb();
+            });
         }
-
-        whereSQL.text += `"when" > $${whereSQL.counter} `;
-        whereSQL.values = whereSQL.values.concat([`'${newDate.toISOString()}'`]);
-    }
-
-    const findQuery = `
-        SELECT *
-        FROM   "wrkr_items" 
-        ${whereSQL.text}`;
-
-    this.pool.query(findQuery, whereSQL.values, (err, result) => {
+    ], err => {
         if (err) return done(err);
 
-        debug('Found ', result.rows);
-        const records = result.rows.map(utils.fieldMapper);
-        return done(null, records);
+        const whereSQL = utils.createWhereSQL(criteria, 1);
+
+        if (!criteria.id && !criteria.when) {
+            const newDate = new Date(0, 0, 0);
+            if (Object.keys(criteria).length === 0) {
+                whereSQL.text += ' WHERE ';
+            } else {
+                whereSQL.text += ' AND ';
+            }
+
+            whereSQL.text += `"when" > $${whereSQL.counter} `;
+            whereSQL.values = whereSQL.values.concat([`'${newDate.toISOString()}'`]);
+        }
+
+        const findQuery = `
+            SELECT *
+            FROM   "wrkr_items" 
+            ${whereSQL.text}`;
+
+        this.pool.query(findQuery, whereSQL.values, (err, result) => {
+            if (err) return done(err);
+
+            debug('Found ', result.rows);
+            async.map(result.rows, (row, next) => {
+                fieldMapper(this, row, next);
+            }, done);
+        });
     });
 };
 
@@ -264,18 +345,150 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
 DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
     debug('Removing', criteria);
 
-    const whereSQL = utils.createWhereSQL(criteria, 1);
-    const removeQuery = `
-        DELETE FROM "wrkr_items"
-        ${whereSQL.text}
-    `;
+    async.waterfall([
+        (cb) => {
+            if (!criteria.name) {
+                return cb();
+            }
 
-    this.pool.query(removeQuery, whereSQL.values, err => {
+            this.getId('event', criteria.name, (err, eventId) => {
+                if (err) return cb(err);
+                criteria.event_id = eventId;
+                delete criteria.name;
+                cb();
+            });
+        },
+        (cb) => {
+            if (!criteria.queue) {
+                return cb();
+            }
+
+            this.getId('queue', criteria.queue, (err, queueId) => {
+                if (err) return cb(err);
+
+                criteria.queue_id = queueId;
+                delete criteria.queue;
+                cb();
+            });
+        }
+    ], err => {
         if (err) return done(err);
 
-        debug('Removed', criteria);
-        done(null);
+        const whereSQL = utils.createWhereSQL(criteria, 1);
+        const removeQuery = `
+            DELETE FROM "wrkr_items"
+            ${whereSQL.text}
+        `;
+
+        this.pool.query(removeQuery, whereSQL.values, err => {
+            if (err) return done(err);
+
+            debug('Removed', criteria);
+            done(null);
+        });
     });
 };
+
+/**
+ * 
+ * @param {*} queueName 
+ */
+DbWrkrPostgreSQL.prototype.getId = function getId(type, name, done) {
+    debug('GetId -', type, name);
+    const memorizedIdObject = type === 'event' ? 'memorizedEventIds' : 'memorizedQueueIds';
+    const memorizedNameObject = type === 'event' ? 'memorizedEventNames' : 'memorizedQueueNames';
+    const self = this;
+
+    if (this[memorizedIdObject] && this[memorizedIdObject][name]) {
+        return done(null, this[memorizedIdObject][name]);
+    }
+
+    function getId(queries, name, cb) {
+        const query = queries.shift();
+
+        self.pool.query(query, [name], (err, result) => {
+            if (err) return cb(err);
+
+            result = result.rows;
+
+            if (result && result.length > 0) {
+                const eventId = result[0].id;
+                self[memorizedIdObject][name] = eventId;
+                self[memorizedNameObject][eventId] = name;
+                return cb(null, eventId);
+            }
+
+            if (queries.length > 0) {
+                return getId(queries, name, cb);
+            }
+
+            cb('noIdFound');
+        });
+    }
+
+    const queueQueries = ['SELECT id FROM "wrkr_queues" WHERE name = $1 LIMIT 1', 'INSERT INTO "wrkr_queues" ("name") VALUES ($1) RETURNING *'];
+    const eventQueries = ['SELECT id FROM "wrkr_events" WHERE name = $1 LIMIT 1', 'INSERT INTO "wrkr_events" ("name") VALUES ($1) RETURNING *'];
+
+    getId(type === 'event' ? eventQueries : queueQueries , name, done);
+};
+
+/**
+ * 
+ */
+DbWrkrPostgreSQL.prototype.getName = function getId(type, id, done) {
+    debug('GetName -', type, id);
+
+    const memorizedIdObject = type === 'event' ? 'memorizedEventIds' : 'memorizedQueueIds';
+    const memorizedNameObject = type === 'event' ? 'memorizedEventNames' : 'memorizedQueueNames';
+
+    if (this[memorizedNameObject] && this[memorizedNameObject][id]) {
+        return done(null, this[memorizedNameObject][id]);
+    }
+
+    const queueQuery = 'SELECT id FROM "wrkr_queues" WHERE id = $1 LIMIT 1';
+    const eventQuery = 'SELECT id FROM "wrkr_events" WHERE id = $1 LIMIT 1';
+
+    this.pool.query(type === 'event' ? eventQuery : queueQuery, [id], (err, result) => {
+        if (err) return done(err);
+
+        const resultName  = result.rows[0].name;
+        this[memorizedNameObject][id] = resultName;
+        this[memorizedIdObject][resultName] = id;
+        return done(null, resultName);
+    });
+};
+
+
+/**
+ * Map (all) fields to the correct values
+ * 
+ * @param {Object} item 
+ * @return {Object} Mapped item
+ */
+function fieldMapper(self, item, done) {
+    async.parallel([
+        cb => {
+            self.getName('event', item.event_id, cb);
+        },
+        cb => {
+            self.getName('queue', item.queue_id, cb);
+        }
+    ], (err, result) => {
+        if (err) return done(err);
+
+        done(null, {
+            id: item.id,
+            name: result[0],
+            tid: item.tid ? item.tid : undefined,
+            parent: item.parent ? item.parent : undefined,
+            payload: item.payload,
+            queue: result[1],
+            created: item.created,
+            when: item.when || undefined,
+            done: item.done || undefined,
+            retryCount: item.retryCount || 0,
+        });
+    });
+}
 
 module.exports = DbWrkrPostgreSQL;
