@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "assert": "1.4.1",
+    "async": "2.5.0",
     "debug": "3.0.0",
     "flw": "0.0.18",
     "lodash": "4.17.4",
