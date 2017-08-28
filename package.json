@@ -1,6 +1,6 @@
 {
   "name": "dbwrkr-postgresql",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "DBWrkr storage engine for PostgreSQL",
   "main": "dbwrkr-postgresql.js",
   "scripts": {
@@ -28,7 +28,6 @@
     "assert": "1.4.1",
     "async": "2.5.0",
     "debug": "3.0.0",
-    "flw": "0.0.18",
     "lodash": "4.17.4",
     "pg": "7.1.2"
   }

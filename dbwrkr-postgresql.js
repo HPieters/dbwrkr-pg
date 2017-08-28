@@ -5,7 +5,6 @@ const assert = require('assert');
 const debug = require('debug')('dbwrkr:postgresql');
 const Pool = require('pg').Pool;
 const _ = require('lodash');
-const flw = require('flw');
 const async = require('async');
 
 // Libraries
@@ -37,6 +36,10 @@ function DbWrkrPostgreSQL(opt) {
     assert(this.pgOptions.database, 'has database name');
     assert(this.pgOptions.port, 'has database port');
 
+    this.getRelationalValue = _.curry(getRelationalValue.bind(this));
+    this.getOrInsertIdValue = _.curry(getOrInsertIdValue.bind(this));
+    this.mapCriteria = _.curry(mapCriteria.bind(this));
+
     this.pool = null;
     this.memorizedEventIds = {};
     this.memorizedQueueIds = {};
@@ -66,6 +69,8 @@ DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
     if (!this.pool) return done();
     this.memorizedEvents = null;
     this.memorizedQueues = null;
+    this.memorizedEventNames = {};
+    this.memorizedQueueNames = {};
     this.pool.end(done);
 };
 
@@ -79,18 +84,15 @@ DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
 DbWrkrPostgreSQL.prototype.subscribe = function subscribe(eventName, queueName, done) {
     debug('Subscribe ', {event: eventName, queue: queueName});
 
-    flw.series([
-        (c, cb) => {
-            this.getId('event', eventName, c._store('eventId', cb));
-        },
-        (c, cb) => {
-            this.getId('queue', queueName , c._store('queueId', cb));
-        },
-        (c, cb) => {
-            const subscribeQuery = 'INSERT INTO "wrkr_subscriptions" ("event_id", "queue_id") VALUES ($1, $2);';
-            this.pool.query(subscribeQuery, [c.eventId, c.queueId], cb);
-        }
-    ], done);
+    async.parallel([
+        this.getOrInsertIdValue('event', eventName),
+        this.getOrInsertIdValue('queue', queueName)
+    ], (err, result) => {
+        if (err) return done(err);
+        // Insert subscription into database, database will refuse if duplicate
+        const subscribeQuery = 'INSERT INTO "wrkr_subscriptions" ("event_id", "queue_id") VALUES ($1, $2);';
+        this.pool.query(subscribeQuery, [result[0], result[1]], done);
+    });
 };
 
 /**
@@ -103,18 +105,15 @@ DbWrkrPostgreSQL.prototype.subscribe = function subscribe(eventName, queueName, 
 DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueName, done) {
     debug('Unsubscribe ', {event: eventName, queue: queueName});
 
-    flw.series([
-        (c, cb) => {
-            this.getId('event', eventName, c._store('eventId', cb));
-        },
-        (c, cb) => {
-            this.getId('queue', queueName, c._store('queueId', cb));
-        },
-        (c, cb) => {
-            const unsubscribeQuery = 'DELETE FROM "wrkr_subscriptions" WHERE "event_id" = $1 AND "queue_id" = $2';
-            this.pool.query(unsubscribeQuery, [c.eventId, c.queueId], cb);
-        }
-    ], done);
+    async.parallel([
+        this.getRelationalValue('id', 'event', eventName),
+        this.getRelationalValue('id', 'queue', queueName)
+    ], (err, result) => {
+        if (err) return done(err);
+
+        const unsubscribeQuery = 'DELETE FROM "wrkr_subscriptions" WHERE "event_id" = $1 AND "queue_id" = $2';
+        this.pool.query(unsubscribeQuery, [result[0], result[1]], done);
+    });
 };
 
 /**
@@ -126,25 +125,23 @@ DbWrkrPostgreSQL.prototype.unsubscribe = function unsubscribe(eventName, queueNa
 DbWrkrPostgreSQL.prototype.subscriptions = function subscriptions(eventName, done) {
     debug('Subscriptions ', {event: eventName});
 
-    async.waterfall([
-        (cb) => {
-            this.getId('event', eventName, cb);
-        },
-        (eventId, cb) => {
-            const subscriptionsQuery = `
-                SELECT      su.event_id, qu.name
-                FROM        wrkr_subscriptions AS su
-                LEFT JOIN   wrkr_queues AS qu ON su.queue_id=qu.id
-                WHERE       event_id = $1`;
+    this.getRelationalValue('id', 'event', eventName, (err, eventId) => {
+        if (err && err !== 'noRecordsFound') return done(err);
+        if (err && err === 'noRecordsFound') return done(null, []);
 
-            this.pool.query(subscriptionsQuery, [eventId], (err, res) => {
-                if (err) return cb(err);
-                cb(null, res.rows);
-            });
-        },
-        (subscriptions, cb) => {
+        const subscriptionsQuery = `
+            SELECT      su.event_id, qu.name
+            FROM        wrkr_subscriptions AS su
+            LEFT JOIN   wrkr_queues AS qu ON su.queue_id=qu.id
+            WHERE       event_id = $1`;
+
+        this.pool.query(subscriptionsQuery, [eventId], (err, res) => {
+            if (err) return done(err);
+
+            const subscriptions = res.rows;
+
             if (subscriptions.length === 0) {
-                return cb(null, []);
+                return done(null, []);
             }
 
             const queueNames = _.reduce(subscriptions, (subscriptionQueues, subscription) => {
@@ -152,14 +149,16 @@ DbWrkrPostgreSQL.prototype.subscriptions = function subscriptions(eventName, don
                 return subscriptionQueues;
             }, []);
 
-            return cb(null, queueNames);
-        }
-    ], done);
+            return done(null, queueNames);
+        });
+    });
 };
 
 /**
  * Publish events
  *
+ * @TODO rewrite convert Event to Query
+ * 
  * @param {String} eventName
  * @param {function} done Callback option
  */
@@ -167,6 +166,7 @@ DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
     const publishEvents = Array.isArray(events) ? events : [events];
 
     debug('Publish ', publishEvents);
+
     const queryData = utils.convertEventsToQuery(events);
     const publishQuery = `
         INSERT INTO wrkr_items (
@@ -205,12 +205,7 @@ DbWrkrPostgreSQL.prototype.publish = function publish(events, done) {
 DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
     debug('fetchNext', queue);
 
-
-    async.waterfall([
-        cb => {
-            this.getId('queue', queue, cb);
-        }
-    ], (err, queueId) => {
+    this.getRelationalValue('id', 'queue', queue, (err, queueId) => {
         if (err) return done(err);
 
         const fetchNextQuery = `
@@ -276,41 +271,14 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
         criteria.id = _.first(criteria.id);
     }
 
-
-    async.waterfall([
-        (cb) => {
-            if (!criteria.name) {
-                return cb();
-            }
-
-            this.getId('event', criteria.name, (err, eventId) => {
-                if (err) return cb(err);
-                criteria.event_id = eventId;
-                delete criteria.name;
-                cb();
-            });
-        },
-        (cb) => {
-            if (!criteria.queue) {
-                return cb();
-            }
-
-            this.getId('queue', criteria.queue, (err, queueId) => {
-                if (err) return cb(err);
-
-                criteria.queue_id = queueId;
-                delete criteria.queue;
-                cb();
-            });
-        }
-    ], err => {
+    this.mapCriteria(criteria, (err, mappedCriteria) => {
         if (err) return done(err);
 
-        const whereSQL = utils.createWhereSQL(criteria, 1);
+        const whereSQL = utils.createWhereSQL(mappedCriteria, 1);
 
-        if (!criteria.id && !criteria.when) {
+        if (!mappedCriteria.id && !mappedCriteria.when) {
             const newDate = new Date(0, 0, 0);
-            if (Object.keys(criteria).length === 0) {
+            if (Object.keys(mappedCriteria).length === 0) {
                 whereSQL.text += ' WHERE ';
             } else {
                 whereSQL.text += ' AND ';
@@ -345,36 +313,10 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
 DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
     debug('Removing', criteria);
 
-    async.waterfall([
-        (cb) => {
-            if (!criteria.name) {
-                return cb();
-            }
-
-            this.getId('event', criteria.name, (err, eventId) => {
-                if (err) return cb(err);
-                criteria.event_id = eventId;
-                delete criteria.name;
-                cb();
-            });
-        },
-        (cb) => {
-            if (!criteria.queue) {
-                return cb();
-            }
-
-            this.getId('queue', criteria.queue, (err, queueId) => {
-                if (err) return cb(err);
-
-                criteria.queue_id = queueId;
-                delete criteria.queue;
-                cb();
-            });
-        }
-    ], err => {
+    this.mapCriteria(criteria, (err, mappedCriteria) => {
         if (err) return done(err);
 
-        const whereSQL = utils.createWhereSQL(criteria, 1);
+        const whereSQL = utils.createWhereSQL(mappedCriteria, 1);
         const removeQuery = `
             DELETE FROM "wrkr_items"
             ${whereSQL.text}
@@ -383,7 +325,7 @@ DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
         this.pool.query(removeQuery, whereSQL.values, err => {
             if (err) return done(err);
 
-            debug('Removed', criteria);
+            debug('Removed', mappedCriteria);
             done(null);
         });
     });
@@ -393,70 +335,102 @@ DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
  * 
  * @param {*} queueName 
  */
-DbWrkrPostgreSQL.prototype.getId = function getId(type, name, done) {
-    debug('GetId -', type, name);
-    const memorizedIdObject = type === 'event' ? 'memorizedEventIds' : 'memorizedQueueIds';
-    const memorizedNameObject = type === 'event' ? 'memorizedEventNames' : 'memorizedQueueNames';
-    const self = this;
+function getRelationalValue(relationalType, valueType, value, done) {
+    const memorizedIdObject = valueType === 'event' ? 'memorizedEventIds' : 'memorizedQueueIds';
+    const memorizedNameObject = valueType === 'event' ? 'memorizedEventNames' : 'memorizedQueueNames';
+    const requestedRelationalType = relationalType === 'id' ? memorizedIdObject : memorizedNameObject;
 
-    if (this[memorizedIdObject] && this[memorizedIdObject][name]) {
-        return done(null, this[memorizedIdObject][name]);
+    // Return the relationalType value from memory object if it exists
+    if (this[requestedRelationalType] && this[requestedRelationalType][value]) {
+        return done(null, this[requestedRelationalType][value]);
     }
 
-    function getId(queries, name, cb) {
-        const query = queries.shift();
+    // Get the value from the database
+    const getRelationalTable = valueType === 'event' ? 'wrkr_events' :  'wrkr_queues';
+    const getRelationalColumn =  relationalType === 'id' ? 'name' : 'id';
+    const getRelationalValueQuery = `SELECT * FROM "${getRelationalTable}" WHERE "${getRelationalColumn}" = $1 LIMIT 1`;
 
-        self.pool.query(query, [name], (err, result) => {
-            if (err) return cb(err);
-
-            result = result.rows;
-
-            if (result && result.length > 0) {
-                const eventId = result[0].id;
-                self[memorizedIdObject][name] = eventId;
-                self[memorizedNameObject][eventId] = name;
-                return cb(null, eventId);
-            }
-
-            if (queries.length > 0) {
-                return getId(queries, name, cb);
-            }
-
-            cb('noIdFound');
-        });
-    }
-
-    const queueQueries = ['SELECT id FROM "wrkr_queues" WHERE name = $1 LIMIT 1', 'INSERT INTO "wrkr_queues" ("name") VALUES ($1) RETURNING *'];
-    const eventQueries = ['SELECT id FROM "wrkr_events" WHERE name = $1 LIMIT 1', 'INSERT INTO "wrkr_events" ("name") VALUES ($1) RETURNING *'];
-
-    getId(type === 'event' ? eventQueries : queueQueries , name, done);
-};
-
-/**
- * 
- */
-DbWrkrPostgreSQL.prototype.getName = function getId(type, id, done) {
-    debug('GetName -', type, id);
-
-    const memorizedIdObject = type === 'event' ? 'memorizedEventIds' : 'memorizedQueueIds';
-    const memorizedNameObject = type === 'event' ? 'memorizedEventNames' : 'memorizedQueueNames';
-
-    if (this[memorizedNameObject] && this[memorizedNameObject][id]) {
-        return done(null, this[memorizedNameObject][id]);
-    }
-
-    const queueQuery = 'SELECT id FROM "wrkr_queues" WHERE id = $1 LIMIT 1';
-    const eventQuery = 'SELECT id FROM "wrkr_events" WHERE id = $1 LIMIT 1';
-
-    this.pool.query(type === 'event' ? eventQuery : queueQuery, [id], (err, result) => {
+    this.pool.query(getRelationalValueQuery, [value], (err, result) => {
         if (err) return done(err);
 
-        const resultName  = result.rows[0].name;
-        this[memorizedNameObject][id] = resultName;
-        this[memorizedIdObject][resultName] = id;
-        return done(null, resultName);
+        const records = result.rows;
+
+        if (records && records.length > 0) {
+            const relationalTypeValue = records[0][relationalType];
+
+            if (relationalType === 'id') {
+                this[memorizedIdObject][value] = relationalTypeValue;
+                this[memorizedNameObject][relationalTypeValue] = value;
+            } else {
+                this[memorizedNameObject][value] = relationalTypeValue;
+                this[memorizedIdObject][relationalTypeValue] = value;
+            }
+            // Return the value, either id or name
+            return done(null, relationalTypeValue);
+        }
+
+        done('noRecordsFound');
     });
-};
+}
+
+
+
+function getOrInsertIdValue(valueType, value, done) {
+    this.getRelationalValue('id', valueType, value, (err, result) => {
+        if (err && err !== 'noRecordsFound') return done(err);
+
+        if (!err) {
+            return done(null, result);
+        }
+
+        const getRelationalTable = valueType === 'event' ? 'wrkr_events' :  'wrkr_queues';
+        const insertRelationalValueQuery = `INSERT INTO "${getRelationalTable}" ("name") VALUES ($1) RETURNING *`;
+
+        this.pool.query(insertRelationalValueQuery, [value], (err, result) => {
+            if (err) return done(err);
+
+            const valueId = result.rows[0].id;
+            done(null, valueId);
+        });
+    });
+}
+
+
+function mapCriteria(criteria, done) {
+    const mappedCriteria = Object.assign({}, criteria);
+
+    async.parallel([
+        (cb) => {
+            if (!mappedCriteria.name) {
+                return cb();
+            }
+
+            this.getRelationalValue('id', 'event', criteria.name, (err, eventId) => {
+                if (err) return cb(err);
+                mappedCriteria.event_id = eventId;
+                delete mappedCriteria.name;
+                cb();
+            });
+        },
+        (cb) => {
+            if (!mappedCriteria.queue) {
+                return cb();
+            }
+
+            this.getRelationalValue('id', 'queue', mappedCriteria.queue, (err, queueId) => {
+                if (err) return cb(err);
+
+                mappedCriteria.queue_id = queueId;
+                delete mappedCriteria.queue;
+                cb();
+            });
+        }
+    ], err => {
+        if (err) return done(err);
+
+        done(null, mappedCriteria);
+    });
+}
 
 
 /**
@@ -468,10 +442,10 @@ DbWrkrPostgreSQL.prototype.getName = function getId(type, id, done) {
 function fieldMapper(self, item, done) {
     async.parallel([
         cb => {
-            self.getName('event', item.event_id, cb);
+            self.getRelationalValue('name', 'event', item.event_id, cb);
         },
         cb => {
-            self.getName('queue', item.queue_id, cb);
+            self.getRelationalValue('name', 'queue', item.queue_id, cb);
         }
     ], (err, result) => {
         if (err) return done(err);
