@@ -6,6 +6,7 @@ const debug = require('debug')('dbwrkr:postgresql');
 const Pool = require('pg').Pool;
 const _ = require('lodash');
 const async = require('async');
+const LRU = require('lru-cache');
 
 // Libraries
 const checkDatabaseAndTables = require('./lib/check');
@@ -36,15 +37,17 @@ function DbWrkrPostgreSQL(opt) {
     assert(this.pgOptions.database, 'has database name');
     assert(this.pgOptions.port, 'has database port');
 
-    this.getRelationalValue = _.curry(getRelationalValue.bind(this));
-    this.getOrInsertIdValue = _.curry(getOrInsertIdValue.bind(this));
-    this.mapCriteria = _.curry(mapCriteria.bind(this));
+    this.getRelationalValue = _.curry(utils.getRelationalValue.bind(this));
+    this.getOrInsertIdValue = _.curry(utils.getOrInsertIdValue.bind(this));
+    this.mapCriteria = _.curry(utils.mapCriteria.bind(this));
+    this.fieldMapper = _.curry(utils.fieldMapper.bind(this));
+    this.convertEventsToQuery = _.curry(utils.convertEventsToQuery.bind(this));
 
     this.pool = null;
-    this.memorizedEventIds = {};
-    this.memorizedQueueIds = {};
-    this.memorizedEventNames = {};
-    this.memorizedQueueNames = {};
+    this.memorizedEventIds = LRU();
+    this.memorizedQueueIds = LRU();
+    this.memorizedEventNames = LRU();
+    this.memorizedQueueNames = LRU();
 }
 
 /**
@@ -66,11 +69,13 @@ DbWrkrPostgreSQL.prototype.connect = function connect(done) {
  * @param {function} done Callback option
  */
 DbWrkrPostgreSQL.prototype.disconnect = function disconnect(done) {
+    debug('Disconnecting from PostgreSQL', this.pgOptions);
     if (!this.pool) return done();
-    this.memorizedEvents = null;
-    this.memorizedQueues = null;
-    this.memorizedEventNames = {};
-    this.memorizedQueueNames = {};
+
+    this.memorizedEventIds.reset();
+    this.memorizedQueueIds.reset();
+    this.memorizedEventNames.reset();
+    this.memorizedQueueNames.reset();
     this.pool.end(done);
 };
 
@@ -234,7 +239,7 @@ DbWrkrPostgreSQL.prototype.fetchNext = function fetchNext(queue, done) {
             result = _.isArray(result) ? _.first(result) : result;
 
             debug('fetchNext item', result);
-            fieldMapper(this, result, done);
+            this.fieldMapper(result, done);
         });
     });
 };
@@ -262,7 +267,7 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
             debug('Found ', result.rows);
 
             async.map(result.rows, (row, next) => {
-                fieldMapper(this, row, next);
+                this.fieldMapper(this, row, next);
             }, done);
         });
     }
@@ -298,7 +303,7 @@ DbWrkrPostgreSQL.prototype.find = function find(criteria, done) {
 
             debug('Found ', result.rows);
             async.map(result.rows, (row, next) => {
-                fieldMapper(this, row, next);
+                this.fieldMapper(row, next);
             }, done);
         });
     });
@@ -330,139 +335,5 @@ DbWrkrPostgreSQL.prototype.remove = function remove(criteria, done) {
         });
     });
 };
-
-/**
- * 
- * @param {*} queueName 
- */
-function getRelationalValue(relationalType, valueType, value, done) {
-    const memorizedIdObject = valueType === 'event' ? 'memorizedEventIds' : 'memorizedQueueIds';
-    const memorizedNameObject = valueType === 'event' ? 'memorizedEventNames' : 'memorizedQueueNames';
-    const requestedRelationalType = relationalType === 'id' ? memorizedIdObject : memorizedNameObject;
-
-    // Return the relationalType value from memory object if it exists
-    if (this[requestedRelationalType] && this[requestedRelationalType][value]) {
-        return done(null, this[requestedRelationalType][value]);
-    }
-
-    // Get the value from the database
-    const getRelationalTable = valueType === 'event' ? 'wrkr_events' :  'wrkr_queues';
-    const getRelationalColumn =  relationalType === 'id' ? 'name' : 'id';
-    const getRelationalValueQuery = `SELECT * FROM "${getRelationalTable}" WHERE "${getRelationalColumn}" = $1 LIMIT 1`;
-
-    this.pool.query(getRelationalValueQuery, [value], (err, result) => {
-        if (err) return done(err);
-
-        const records = result.rows;
-
-        if (records && records.length > 0) {
-            const relationalTypeValue = records[0][relationalType];
-
-            if (relationalType === 'id') {
-                this[memorizedIdObject][value] = relationalTypeValue;
-                this[memorizedNameObject][relationalTypeValue] = value;
-            } else {
-                this[memorizedNameObject][value] = relationalTypeValue;
-                this[memorizedIdObject][relationalTypeValue] = value;
-            }
-            // Return the value, either id or name
-            return done(null, relationalTypeValue);
-        }
-
-        done('noRecordsFound');
-    });
-}
-
-
-
-function getOrInsertIdValue(valueType, value, done) {
-    this.getRelationalValue('id', valueType, value, (err, result) => {
-        if (err && err !== 'noRecordsFound') return done(err);
-
-        if (!err) {
-            return done(null, result);
-        }
-
-        const getRelationalTable = valueType === 'event' ? 'wrkr_events' :  'wrkr_queues';
-        const insertRelationalValueQuery = `INSERT INTO "${getRelationalTable}" ("name") VALUES ($1) RETURNING *`;
-
-        this.pool.query(insertRelationalValueQuery, [value], (err, result) => {
-            if (err) return done(err);
-
-            const valueId = result.rows[0].id;
-            done(null, valueId);
-        });
-    });
-}
-
-
-function mapCriteria(criteria, done) {
-    const mappedCriteria = Object.assign({}, criteria);
-
-    async.parallel([
-        (cb) => {
-            if (!mappedCriteria.name) {
-                return cb();
-            }
-
-            this.getRelationalValue('id', 'event', criteria.name, (err, eventId) => {
-                if (err) return cb(err);
-                mappedCriteria.event_id = eventId;
-                delete mappedCriteria.name;
-                cb();
-            });
-        },
-        (cb) => {
-            if (!mappedCriteria.queue) {
-                return cb();
-            }
-
-            this.getRelationalValue('id', 'queue', mappedCriteria.queue, (err, queueId) => {
-                if (err) return cb(err);
-
-                mappedCriteria.queue_id = queueId;
-                delete mappedCriteria.queue;
-                cb();
-            });
-        }
-    ], err => {
-        if (err) return done(err);
-
-        done(null, mappedCriteria);
-    });
-}
-
-
-/**
- * Map (all) fields to the correct values
- * 
- * @param {Object} item 
- * @return {Object} Mapped item
- */
-function fieldMapper(self, item, done) {
-    async.parallel([
-        cb => {
-            self.getRelationalValue('name', 'event', item.event_id, cb);
-        },
-        cb => {
-            self.getRelationalValue('name', 'queue', item.queue_id, cb);
-        }
-    ], (err, result) => {
-        if (err) return done(err);
-
-        done(null, {
-            id: item.id,
-            name: result[0],
-            tid: item.tid ? item.tid : undefined,
-            parent: item.parent ? item.parent : undefined,
-            payload: item.payload,
-            queue: result[1],
-            created: item.created,
-            when: item.when || undefined,
-            done: item.done || undefined,
-            retryCount: item.retryCount || 0,
-        });
-    });
-}
 
 module.exports = DbWrkrPostgreSQL;

@@ -14,6 +14,9 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.1.4
+* Add cache library, cleanup, move functions to utils
+
 v0.1.3
 * Change architecture to a relational schema
 
