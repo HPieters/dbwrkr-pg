@@ -14,6 +14,9 @@ DBWrkr pub-sub system <https://github.com/whyhankee/dbwrkr>
 
 ## Changelog
 
+v0.1.6
+* Fixed bug in setup, misspelled port caused setup to crash on ports other than default. Also added catch handler to handle correctly.
+
 v0.1.5
 * Corrected double indexes
 
